@@ -35,7 +35,7 @@ promhttp_metric_handler_requests_total{code="503"} 0
 ```
 
 Supports binance.com, uses binance.us by default though.
-By default, exports coin values for coins in wallet where balance `!=0` (uses USD trade values) - can be overriden by `trackAllPrices`.
+By default, exports only coin values for coins in wallet where balance `!=0` (uses USD trade values) - can be overriden by `trackAllPrices`.
 
 ```
 ./binance-pricer  --help
