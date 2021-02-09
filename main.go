@@ -5,13 +5,14 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
+	"github.com/adshao/go-binance/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-
-	"github.com/adshao/go-binance/v2"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -20,6 +21,9 @@ const (
 	defaultHTTPServerPort      = 8090
 	defaultPrometheusNamespace = "binance"
 	defaultTrackAllPrices      = false
+	defaultDebug               = false
+	defaultLogLevel            = log.InfoLevel
+	defaultPriceSymbol         = "USD"
 )
 
 type runtimeConfStruct struct {
@@ -40,6 +44,7 @@ type runtimeConfStruct struct {
 
 	updateInterval string
 	updateIval     time.Duration
+	debug          bool
 }
 
 var rConf runtimeConfStruct = runtimeConfStruct{
@@ -59,23 +64,35 @@ var rConf runtimeConfStruct = runtimeConfStruct{
 	updateIval:     0,
 }
 
-func main() {
+func initParams() {
 	// Flag values
 	flag.StringVar(&rConf.apiKey, "apiKey", "", "Binance API Key")
-	flag.StringVar(&rConf.secretKey, "secretKey", "", "Binance API secret Key")
+	flag.StringVar(&rConf.secretKey, "apiSecret", "", "Binance API secret Key")
 	flag.StringVar(&rConf.apiBaseURL, "apiBaseUrl", defaultBaseURL, "Binance base API URL")
 	flag.StringVar(&rConf.updateInterval, "updateInterval", defaultUpdateInterval, "Binance update interval")
 	flag.BoolVar(&rConf.trackAllPrices, "trackAllPrices", defaultTrackAllPrices, "Intructs to track all prices vs only prices of coins in seen in balance")
 	flag.UintVar(&rConf.httpServerPort, "httpServerPort", defaultHTTPServerPort, "HTTP server port")
+	flag.BoolVar(&rConf.debug, "debug", defaultDebug, "Set debug log level")
 	flag.Parse()
+
+	logLvl := defaultLogLevel
+	if rConf.debug {
+		logLvl = log.DebugLevel
+	}
+	log.SetLevel(logLvl)
 
 	// Update interval parse
 	updIval, err := time.ParseDuration(rConf.updateInterval)
 	if err != nil {
-		fmt.Printf("Could not parse update interval duration, %v", err)
-		return
+		log.Errorf("Could not parse update interval duration, %v", err)
+		os.Exit(-1)
 	}
 	rConf.updateIval = updIval
+}
+
+func main() {
+	// basic init and parsing of flags
+	initParams()
 
 	// Init binance client
 	rConf.client = binance.NewClient(rConf.apiKey, rConf.secretKey)
@@ -94,9 +111,11 @@ func main() {
 		Handler: httpMux,
 	}
 	go func() {
-		fmt.Printf("Starting HTTP server at %s\n", rConf.httpServ.Addr)
-		rConf.httpServ.ListenAndServe()
-
+		log.Infof("> Starting HTTP server at %s\n", rConf.httpServ.Addr)
+		err := rConf.httpServ.ListenAndServe()
+		if err != http.ErrServerClosed {
+			log.Errorf("HTTP Server errored out %v", err)
+		}
 	}()
 
 	// Init Prometheus Gauge Vectors
@@ -121,7 +140,7 @@ func main() {
 	// Regular loop operations below
 	ticker := time.NewTicker(rConf.updateIval)
 	for {
-		fmt.Printf("Updating....\n")
+		log.Debug("> Updating....\n")
 
 		// Update balances
 		updateAccountBalances()
@@ -136,7 +155,7 @@ func main() {
 func updateAccountBalances() error {
 	acc, err := rConf.client.NewGetAccountService().Do(context.Background())
 	if err != nil {
-		fmt.Printf("Failed to get account Balances: %v\n", err)
+		log.Errorf("Failed to get account Balances: %v\n", err)
 		return err
 	}
 	for _, bal := range acc.Balances {
@@ -146,7 +165,9 @@ func updateAccountBalances() error {
 		if free+locked != 0 {
 			rConf.balances.WithLabelValues(bal.Asset, "free").Set(free)
 			rConf.balances.WithLabelValues(bal.Asset, "locked").Set(locked)
-			rConf.observedWalletCoins[bal.Asset+"USD"] = true
+			// This is an easy fix to later have the market trade symbols
+			// lookup successfully on the coin symbols we have
+			rConf.observedWalletCoins[bal.Asset+defaultPriceSymbol] = true
 		}
 	}
 	return nil
@@ -155,7 +176,7 @@ func updateAccountBalances() error {
 func updatePrices() error {
 	prices, err := rConf.client.NewListPricesService().Do(context.Background())
 	if err != nil {
-		fmt.Printf("Failed to get prices: %v\n", err)
+		log.Errorf("Failed to get prices: %v\n", err)
 		return err
 	}
 
