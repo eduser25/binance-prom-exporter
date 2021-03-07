@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/adshao/go-binance/v2"
@@ -20,7 +21,7 @@ const (
 	defaultBaseURL             = "https://api.binance.us"
 	defaultHTTPServerPort      = 8090
 	defaultPrometheusNamespace = "binance"
-	defaultTrackAllPrices      = false
+	defaultTrackAllSymbols     = false
 	defaultDebug               = false
 	defaultLogLevel            = log.InfoLevel
 	defaultPriceSymbol         = "USD"
@@ -31,11 +32,13 @@ type runtimeConfStruct struct {
 	secretKey  string
 	apiBaseURL string
 
-	trackAllPrices bool
+	coinPrices *prometheus.GaugeVec
+	balances   *prometheus.GaugeVec
 
-	coinPrices          *prometheus.GaugeVec
-	balances            *prometheus.GaugeVec
-	observedWalletCoins map[string]bool
+	symbolsOFInterest map[string]string
+	trackAllSymbols   bool
+	manualSymbols     string
+	pricesSymbol      string
 
 	client         *binance.Client
 	registry       *prometheus.Registry
@@ -48,31 +51,49 @@ type runtimeConfStruct struct {
 }
 
 var rConf runtimeConfStruct = runtimeConfStruct{
-	apiKey:              "",
-	secretKey:           "",
-	apiBaseURL:          "",
-	trackAllPrices:      false,
-	coinPrices:          nil,
-	balances:            nil,
-	observedWalletCoins: make(map[string]bool),
-	client:              nil,
-	registry:            prometheus.NewRegistry(),
-	httpServerPort:      0,
-	httpServ:            nil,
+	apiKey:     "",
+	secretKey:  "",
+	apiBaseURL: "",
+	coinPrices: nil,
+	balances:   nil,
 
+	symbolsOFInterest: make(map[string]string),
+	manualSymbols:     "",
+	trackAllSymbols:   false,
+
+	client:         nil,
+	registry:       prometheus.NewRegistry(),
+	httpServerPort: 0,
+	httpServ:       nil,
+
+	pricesSymbol:   "",
 	updateInterval: "",
 	updateIval:     0,
 }
 
+func parsePriceCoins(symbolList string) {
+	syms := strings.Split(symbolList, ",")
+
+	for _, coinSym := range syms {
+		// This maps market symbols to the specific coin we are interested in
+		log.Debugf("> Tracking %s", strings.Join([]string{coinSym, rConf.pricesSymbol}, ""))
+		rConf.symbolsOFInterest[coinSym+rConf.pricesSymbol] = coinSym
+	}
+}
+
 func initParams() {
 	// Flag values
-	flag.StringVar(&rConf.apiKey, "apiKey", "", "Binance API Key")
-	flag.StringVar(&rConf.secretKey, "apiSecret", "", "Binance API secret Key")
-	flag.StringVar(&rConf.apiBaseURL, "apiBaseUrl", defaultBaseURL, "Binance base API URL")
+	flag.StringVar(&rConf.apiKey, "apiKey", "", "Binance API Key.")
+	flag.StringVar(&rConf.secretKey, "apiSecret", "", "Binance API secret Key.")
+	flag.StringVar(&rConf.apiBaseURL, "apiBaseUrl", defaultBaseURL, "Binance base API URL.")
 	flag.StringVar(&rConf.updateInterval, "updateInterval", defaultUpdateInterval, "Binance update interval")
-	flag.BoolVar(&rConf.trackAllPrices, "trackAllPrices", defaultTrackAllPrices, "Intructs to track all prices vs only prices of coins in seen in balance")
-	flag.UintVar(&rConf.httpServerPort, "httpServerPort", defaultHTTPServerPort, "HTTP server port")
-	flag.BoolVar(&rConf.debug, "debug", defaultDebug, "Set debug log level")
+	flag.UintVar(&rConf.httpServerPort, "httpServerPort", defaultHTTPServerPort, "HTTP server port.")
+	flag.BoolVar(&rConf.debug, "debug", defaultDebug, "Set debug log level.")
+	flag.BoolVar(&rConf.trackAllSymbols, "trackAll", defaultTrackAllSymbols, "Will set to track all market symbols.")
+	flag.StringVar(&rConf.pricesSymbol, "priceSymbol", defaultPriceSymbol, "Set the default baseline currency symbol to calculate prices.")
+
+	manualPrices := ""
+	flag.StringVar(&manualPrices, "symbols", "", "Manually set the curency symbols to track (uses baseline to get market symbols).")
 	flag.Parse()
 
 	logLvl := defaultLogLevel
@@ -88,6 +109,8 @@ func initParams() {
 		os.Exit(-1)
 	}
 	rConf.updateIval = updIval
+
+	parsePriceCoins(manualPrices)
 }
 
 func main() {
@@ -163,11 +186,17 @@ func updateAccountBalances() error {
 		locked, _ := strconv.ParseFloat(bal.Locked, 64)
 
 		if free+locked != 0 {
+
+			log.Debugf("> Observing free in wallet %f for %s", free, bal.Asset)
 			rConf.balances.WithLabelValues(bal.Asset, "free").Set(free)
+			log.Debugf("> Observing locked in wallet %f for %s", locked, bal.Asset)
 			rConf.balances.WithLabelValues(bal.Asset, "locked").Set(locked)
-			// This is an easy fix to later have the market trade symbols
-			// lookup successfully on the coin symbols we have
-			rConf.observedWalletCoins[bal.Asset+defaultPriceSymbol] = true
+
+			if _, found := rConf.symbolsOFInterest[bal.Asset+rConf.pricesSymbol]; !found && (rConf.pricesSymbol != bal.Asset) {
+				// This is a simple way to map trade market symbols (BTCUSD) to the asset we hold in wallet (BTC)
+				log.Debugf("> Tracking %s", bal.Asset+rConf.pricesSymbol)
+				rConf.symbolsOFInterest[bal.Asset+rConf.pricesSymbol] = bal.Asset
+			}
 		}
 	}
 	return nil
@@ -181,8 +210,19 @@ func updatePrices() error {
 	}
 
 	for _, p := range prices {
-		if _, ok := rConf.observedWalletCoins[p.Symbol]; ok || rConf.trackAllPrices {
+		if !rConf.trackAllSymbols {
+			if symbol, ok := rConf.symbolsOFInterest[p.Symbol]; ok {
+				// This observes values with asset label value (ie. BTC) and obviates baseline currency in label,
+				// This is made like so to later have prometheus be able to easilly match wallet symbols and price symbols
+				// (ie. Balance calculation vector `prices * wallet` will automatically match the right labels)
+				price, _ := strconv.ParseFloat(p.Price, 64)
+				log.Debugf("> Observing %f for %s", price, symbol)
+				rConf.coinPrices.WithLabelValues(symbol).Set(price)
+			}
+		} else {
+			// This observes values with full market symbol label value (BTCETH)
 			price, _ := strconv.ParseFloat(p.Price, 64)
+			log.Debugf("> Observing %f for %s", price, p.Symbol)
 			rConf.coinPrices.WithLabelValues(p.Symbol).Set(price)
 		}
 	}
