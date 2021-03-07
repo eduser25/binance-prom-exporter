@@ -1,5 +1,5 @@
 # binance-prom-exporter
-Simple binance wallet and coin price exporter to prometheus format.
+Simple binance wallet and coin price exporter to Prometheus format.
 
 ```
 ./binance-prom-exporter -apiKey=<apiKey> -apiSecret=<secretKey> -priceSymbol "USD" --symbols "DOGE,BTC"
