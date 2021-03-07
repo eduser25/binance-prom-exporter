@@ -1,4 +1,4 @@
-# binance-pricer
+# binance-prom-exporter
 Simple binance wallet and coin price exporter to prometheus format.
 
 ```
