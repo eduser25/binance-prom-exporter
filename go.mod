@@ -1,4 +1,4 @@
-module github.com/eduser25/binance-pricer
+module github.com/eduser25/binance-prom-exporter
 
 go 1.14
 
