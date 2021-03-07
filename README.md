@@ -50,7 +50,7 @@ This makes it easy to calc later balances through PromQL as labels will match wi
 
 Market labels here are in full.
 
-Supports binance.com, uses binance.us by default though.
+Supports `binance.com`, uses `binance.us` by default.
 
 ```
 Usage of ./binance-prom-exporter:
