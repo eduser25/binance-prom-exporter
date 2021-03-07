@@ -2,7 +2,7 @@
 Simple binance wallet and coin price exporter to prometheus format.
 
 ```
-./binance-pricer -apiKey=<apiKey> -apiSecret=<secretKey> -priceSymbol "USD" --symbols "DOGE,BTC"
+./binance-prom-exporter -apiKey=<apiKey> -apiSecret=<secretKey> -priceSymbol "USD" --symbols "DOGE,BTC"
 INFO[0000] > Starting HTTP server at :8090
 ...
 ```
@@ -53,7 +53,7 @@ Market labels here are in full.
 Supports binance.com, uses binance.us by default though.
 
 ```
-Usage of ./binance-pricer:
+Usage of ./binance-prom-exporter:
   -apiBaseUrl string
     	Binance base API URL. (default "https://api.binance.us")
   -apiKey string
